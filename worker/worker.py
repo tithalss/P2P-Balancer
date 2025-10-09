@@ -1,86 +1,91 @@
 import socket
 import json
+import threading
 import time
 import uuid
 
 WORKER_ID = str(uuid.uuid4())
-HOST = socket.gethostbyname(socket.gethostname())
+HOST = "127.0.0.1"
 PORT = 6000
+MASTER = "127.0.0.1:5000"
 
-CURRENT_MASTER = None  # ex: "ip:porta"
-SIMULATED_TASK_TIME = 3
-
-# ---------------- FUNÇÕES ----------------
 
 def send_json(sock, obj):
-    sock.sendall(json.dumps(obj).encode("utf-8"))
+    sock.sendall(json.dumps(obj).encode())
 
-def register_to_master(master_address):
-    global CURRENT_MASTER
-    CURRENT_MASTER = master_address
-    host, port = master_address.split(":")
-    port = int(port)
+
+def register_master():
+    h, p = MASTER.split(":")
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((host, port))
-            msg = {"type": "register_worker", "worker_id": WORKER_ID}
-            send_json(s, msg)
-            print(f"[REGISTRO] Worker registrado no master {master_address}")
+        with socket.socket() as s:
+            s.connect((h, int(p)))
+            send_json(s, {"type": "register_worker", "worker_id": WORKER_ID, "port": PORT})
+            print(f"[WORKER] Registrado no Master {MASTER}")
     except Exception as e:
-        print(f"[ERRO] Registro no master {master_address}: {e}")
+        print(f"[WORKER] Erro ao registrar: {e}")
+
+
+def report_status(status="PARADO"):
+    h, p = MASTER.split(":")
+    try:
+        with socket.socket() as s:
+            s.connect((h, int(p)))
+            send_json(s, {"type": "status_update", "worker_id": WORKER_ID, "status": status})
+            print(f"[WORKER] Status enviado: {status}")
+    except Exception:
+        pass
+
+
+def send_result(task_id, result):
+    h, p = MASTER.split(":")
+    try:
+        with socket.socket() as s:
+            s.connect((h, int(p)))
+            send_json(s, {"type": "task_result", "worker_id": WORKER_ID, "task_id": task_id, "result": result})
+            print(f"[WORKER] Resultado enviado: Tarefa {task_id} = {result}")
+    except Exception as e:
+        print(f"[WORKER] Erro ao enviar resultado: {e}")
+
 
 def process_task(payload):
-    task_id = payload.get("task_id", str(uuid.uuid4()))
-    print(f"[TAREFA] Executando {task_id}")
-    time.sleep(SIMULATED_TASK_TIME)
-    print(f"[TAREFA] Concluída {task_id}")
+    task_id = payload.get("task_id")
+    numbers = payload.get("numbers", [])
+    report_status("OCUPADO")
+    print(f"[WORKER] Executando tarefa {task_id}: {numbers}")
+    time.sleep(2)
+    result = sum(numbers)
+    print(f"[WORKER] Tarefa {task_id} concluída: {result}")
+    send_result(task_id, result)
+    report_status("PARADO")
 
-def reconnect_to_master(new_master_address):
-    print(f"[RECONFIG] Mudando master para {new_master_address}")
-    register_to_master(new_master_address)
-
-# ---------------- SERVIDOR ----------------
 
 def start_worker_server():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((HOST, PORT))
-    server.listen(5)
-    print(f"[WORKER] Ativo em {HOST}:{PORT} (ID: {WORKER_ID})")
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind((HOST, PORT))
+    s.listen(5)
+    print(f"[WORKER] Servidor ativo em {HOST}:{PORT} (ID {WORKER_ID})")
 
     while True:
-        conn, addr = server.accept()
+        conn, _ = s.accept()
         try:
-            data = conn.recv(4096).decode("utf-8")
-            if not data:
-                conn.close()
-                continue
-            msg = json.loads(data)
-            msg_type = msg.get("type")
+            msg = json.loads(conn.recv(4096).decode())
+            tipo = msg.get("type")
             payload = msg.get("payload", {})
 
-            if msg_type == "assign_task":
-                process_task(payload)
-
-            elif msg_type == "change_master":
-                new_master = payload.get("new_master")
-                if new_master:
-                    reconnect_to_master(new_master)
+            if tipo == "assign_task":
+                threading.Thread(target=process_task, args=(payload,), daemon=True).start()
 
         except Exception as e:
-            print(f"[ERRO] {e}")
+            print(f"[WORKER] Erro no servidor: {e}")
         finally:
             conn.close()
 
+
 if __name__ == "__main__":
-    # inicia servidor em background
-    import threading
     threading.Thread(target=start_worker_server, daemon=True).start()
-
-    # registra no master inicial
-    INITIAL_MASTER = "10.62.217.16:5000"  # <-- ajuste seu master
     time.sleep(1)
-    register_to_master(INITIAL_MASTER)
+    register_master()
 
-    # mantém servidor rodando
     while True:
         time.sleep(1)
+        report_status("PARADO")
