@@ -6,8 +6,16 @@ import uuid
 import random
 
 MASTER_ID = str(uuid.uuid4())
-HOST = "127.0.0.1"
+HOST = "10.62.217.16"
 PORT = 5000
+
+OTHER_MASTERS = [
+    ("10.62.217.209", 5000),
+    ("10.62.217.199", 5000),
+    ("10.62.217.212", 5000),
+    ("10.62.217.203", 5000),
+    ("10.62.217.22", 5000)
+]
 
 workers = {}
 pending_tasks = []
@@ -59,16 +67,6 @@ def handle_client(conn, addr):
         conn.close()
 
 
-def start_master_server():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        server.bind((HOST, PORT))
-        server.listen()
-        print(f"[MASTER] Servidor ativo em {HOST}:{PORT} (ID {MASTER_ID})")
-        while True:
-            conn, addr = server.accept()
-            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
-
-
 def distribute_tasks():
     while True:
         with lock:
@@ -91,9 +89,43 @@ def distribute_tasks():
         time.sleep(1)
 
 
+def heartbeat():
+    while True:
+        for host, port in OTHER_MASTERS:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(3)
+                    s.connect((host, port))
+                    heartbeat_msg = {
+                        "SERVER_ID": MASTER_ID,
+                        "TASK": "HEARTBEAT"
+                    }
+                    s.sendall(json.dumps(heartbeat_msg).encode('utf-8'))
+                    response_data = s.recv(4096).decode('utf-8')
+                    response = json.loads(response_data)
+                    if response.get("RESPONSE") == "ALIVE":
+                        print(f"[ALIVE] {host}:{port} -> ID: {response.get('SERVER_ID')}")
+                    else:
+                        print(f"[RESPOSTA INESPERADA] {host}:{port}: {response}")
+            except Exception as e:
+                print(f"[SEM RESPOSTA] {host}:{port} - {e}")
+        time.sleep(5)
+
+
+def start_master_server():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind((HOST, PORT))
+        server.listen()
+        print(f"[MASTER] Servidor ativo em {HOST}:{PORT} (ID {MASTER_ID})")
+        while True:
+            conn, addr = server.accept()
+            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+
+
 if __name__ == "__main__":
     threading.Thread(target=start_master_server, daemon=True).start()
     threading.Thread(target=distribute_tasks, daemon=True).start()
+    threading.Thread(target=heartbeat, daemon=True).start()
 
     i = 1
     while True:
