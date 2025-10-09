@@ -52,7 +52,6 @@ def process_task(payload):
     numbers = payload.get("numbers", [])
     report_status("OCUPADO")
     print(f"[WORKER] Executando tarefa {task_id}: {numbers}")
-    time.sleep(2)
     result = sum(numbers)
     print(f"[WORKER] Tarefa {task_id} concluída: {result}")
     send_result(task_id, result)
@@ -87,5 +86,5 @@ if __name__ == "__main__":
     register_master()
 
     while True:
-        time.sleep(1)
+        time.sleep(5)
         report_status("PARADO")

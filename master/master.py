@@ -98,6 +98,7 @@ def heartbeat():
                     s.connect((host, port))
                     heartbeat_msg = {
                         "SERVER_ID": MASTER_ID,
+                        "AUTHOR": "THALES",
                         "TASK": "HEARTBEAT"
                     }
                     s.sendall(json.dumps(heartbeat_msg).encode('utf-8'))
@@ -136,4 +137,4 @@ if __name__ == "__main__":
         pending_tasks.append(task)
         print(f"[MASTER] Nova tarefa: {task['task_id']} -> {task['numbers']}")
         i += 1
-        time.sleep(10)
+        time.sleep(15)
