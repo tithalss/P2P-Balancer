@@ -14,3 +14,74 @@ SERVIDOR - SERVIDOR
 
 | 4.3 | Worker (Emprestado) → Servidor A | `{"WORKER": "ALIVE", "WORKER_UUID":"..."}` | Worker emprestado envia uma conexão para o servidor saturado. |
 
+# P2P-Balancer: Sistema Distribuído com Balanceamento de Carga Dinâmico
+
+Este projeto implementa um sistema distribuído autônomo baseado na arquitetura **Master-Worker Peer-to-Peer (P2P)**, com capacidade de balanceamento de carga horizontal através de empréstimo dinâmico de Workers.
+
+---
+
+## 1. Arquitetura e Objetivos
+
+O sistema é composto por:
+* **Nó Master:** Gerencia sua própria *Farm* de Workers, monitora a carga e negocia recursos com Masters vizinhos quando saturado.
+* **Nó Worker:** Executa as tarefas delegadas pelo seu Master atual e deve ser capaz de se redirecionar para outro Master temporariamente.
+
+O objetivo principal é demonstrar o **Protocolo de Conversa Concensual** para que Masters possam coordenar o empréstimo de Workers via comunicação TCP/Sockets, garantindo a autonomia e interoperabilidade entre as Farms.
+
+---
+
+## 2. Protocolo de Conversa Concensual: Empréstimo de Worker
+
+O fluxo a seguir detalha o protocolo de negociação entre dois Masters (Master A - Saturado, Master B - Ocioso) e o Worker emprestado (Worker B1), incluindo a gestão de conexões TCP e o ciclo de vida da tarefa.
+
+O diagrama foi construído usando a sintaxe Mermaid e é renderizado nativamente pelo GitHub.
+
+```mermaid
+sequenceDiagram
+    participant MA as Master A
+    participant MB as Master B
+    participant WB1 as Worker B1
+    
+    Note over MA: Detecta carga > Threshold
+    MA->>MB: Estabelece conexão TCP
+    MA->>MB: Envia mensagem de ajuda
+    
+    par
+        Note right of MB: [Master B analisa carga]
+        MB->>MB: Analisa própria carga
+    end
+    
+    alt Master B tem Workers ociosos
+        MB-->>MA: Envia resposta aceita
+        
+        Note right of MB: Seleciona Worker B1 para empréstimo
+        Note right of MB: Master B encerra sua conexão TCP com Worker B1
+        
+        MB->>WB1: Envia comando para desconexão
+        
+        WB1-->>MB: Desconecta de Master B
+        WB1->>MA: Estabelece nova conexão
+        WB1->>MA: Envia registro temporário
+        
+        MA->>WB1: Delegar TASK: {"TASK": "QUERY", ...}
+        WB1-->>MA: Resultado: {"STATUS": "OK", ...}
+        
+        MA->>WB1: Delegação de tarefas
+        WB1->>MA: Trabalha para Master A
+        
+        Note over MA: Finaliza/normaliza carga
+        MA->>WB1: Envia comando de liberação
+        MA->>MB: Notifica retorno de Worker
+        
+        WB1-->>MA: Desconecta de Master A
+        WB1->>MB: Restabelece conexão
+        WB1->>MB: Envia re-registro
+        MB-->>WB1: Confirma re-registro
+        
+        Note right of MB: Master B reabre/mantém conexão TCP original com Master A para futuras negociações
+    
+    else Master B ocupado
+        MB-->>MA: Envia resposta rejeitada
+        Note right of MB: Master B encerra conexão TCP com Master A
+        MA->>MA: Repete processo ou tenta outro vizinho
+    end
