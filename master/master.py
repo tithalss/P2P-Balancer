@@ -7,30 +7,25 @@ import random
 
 MASTER_ID = str(uuid.uuid4())
 PORT = 5000
-NEIGHBOR_MASTER = ("10.62.217.16", 5000)  # Endereço do master vizinho
+NEIGHBOR_MASTER = ("10.62.217.13", 5000)
 THRESHOLD = 8
 HOST = "10.62.217.201"
+HEARTBEAT_INTERVAL = 5
+HEARTBEAT_TIMEOUT = 15
 
 workers = {}
 pending_tasks = []
 lock = threading.Lock()
-
-# Controle de heartbeat
 known_masters = {}
-HEARTBEAT_INTERVAL = 5
-HEARTBEAT_TIMEOUT = 15  # se não responder em até 15s, é considerado inativo
 
 
 def send_json(sock, obj):
     sock.sendall(json.dumps(obj).encode())
 
 
-# ========== HANDLER DE CONEXÕES ==========
 def handle_client(conn, addr):
     try:
         msg = json.loads(conn.recv(4096).decode())
-
-        # --- Heartbeat entre Masters ---
         if msg.get("type") == "MASTER_ALIVE":
             master_id = msg.get("MASTER_ID")
             with lock:
@@ -47,7 +42,6 @@ def handle_client(conn, addr):
             print(f"[{MASTER_ID}] {mid} respondeu o heartbeat")
             return
 
-        # --- Registro de worker ---
         if msg.get("type") == "register_worker":
             wid = msg["worker_id"]
             port = msg.get("port", 6000)
@@ -56,7 +50,6 @@ def handle_client(conn, addr):
             print(f"[{MASTER_ID}] Worker {wid} registrado ({addr[0]}:{port})")
             send_json(conn, {"status": "registered"})
 
-        # --- Worker Alive (de outro Master) ---
         elif msg.get("WORKER") == "ALIVE":
             wid = msg.get("WORKER_UUID")
             origin = msg.get("MASTER_ORIGIN")
@@ -66,7 +59,6 @@ def handle_client(conn, addr):
                 workers[wid] = {"host": worker_host, "port": worker_port, "status": "PARADO"}
             print(f"[{MASTER_ID}] Worker redirecionado do {origin}: {wid}")
 
-        # --- Resultado de tarefa ---
         elif msg.get("type") == "task_result":
             wid = msg["worker_id"]
             task_id = msg["task_id"]
@@ -76,7 +68,6 @@ def handle_client(conn, addr):
                 if wid in workers:
                     workers[wid]["status"] = "PARADO"
 
-        # --- Pedido de suporte ---
         elif msg.get("TASK") == "WORKER_REQUEST":
             requester = msg.get("MASTER")
             with lock:
@@ -103,7 +94,6 @@ def handle_client(conn, addr):
         conn.close()
 
 
-# ========== SERVIDOR PRINCIPAL ==========
 def start_master_server():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind((HOST, PORT))
@@ -114,9 +104,7 @@ def start_master_server():
         threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
 
-# ========== HEARTBEAT ENTRE MASTERS ==========
 def master_heartbeat():
-    """Envia periodicamente um heartbeat ao master vizinho"""
     while True:
         try:
             with socket.socket() as s:
@@ -135,7 +123,6 @@ def master_heartbeat():
 
 
 def monitor_masters():
-    """Verifica se algum master parou de responder"""
     while True:
         now = time.time()
         with lock:
@@ -146,7 +133,6 @@ def monitor_masters():
         time.sleep(5)
 
 
-# ========== DISTRIBUIÇÃO DE TAREFAS ==========
 def distribute_tasks():
     while True:
         with lock:
@@ -172,7 +158,6 @@ def distribute_tasks():
         time.sleep(1)
 
 
-# ========== MONITORAMENTO DE CARGA ==========
 def monitor_load():
     while True:
         time.sleep(3)
@@ -183,7 +168,6 @@ def monitor_load():
             request_support()
 
 
-# ========== PEDIDO DE SUPORTE ==========
 def request_support():
     try:
         with socket.socket() as s:
@@ -205,7 +189,6 @@ def request_support():
         print(f"[{MASTER_ID}] ERRO solicitando suporte: {e}")
 
 
-# ========== GERADOR DE TAREFAS ==========
 def generate_tasks():
     i = 1
     while True:
@@ -213,10 +196,9 @@ def generate_tasks():
         with lock:
             pending_tasks.append(task)
         i += 1
-        time.sleep(8)
+        time.sleep(2)
 
 
-# ========== MAIN ==========
 if __name__ == "__main__":
     threading.Thread(target=start_master_server, daemon=True).start()
     threading.Thread(target=master_heartbeat, daemon=True).start()
