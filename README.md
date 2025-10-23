@@ -35,3 +35,38 @@ O objetivo principal é demonstrar o **Protocolo de Conversa Concensual** para q
 O fluxo a seguir detalha o protocolo de negociação entre dois Masters (Master A - Saturado, Master B - Ocioso) e o Worker emprestado (Worker B1), incluindo a gestão de conexões TCP e o ciclo de vida da tarefa.
 
 O diagrama foi construído usando a sintaxe Mermaid e é renderizado nativamente pelo GitHub.
+
+
+
+## 📝 Diagrama da Sprint 3: Protocolo de Conversa Consensual
+
+Este diagrama de sequência detalha a negociação e migração de Workers entre Masters, seguindo rigorosamente o Protocolo de Comunicação Padrão exigido (baseado em TASK e RESPONSE).
+
+```mermaid
+sequenceDiagram
+    participant MA as Master A
+    participant MB as Master B
+    participant W as Worker B1
+
+    Note over MA: MA detecta saturação (Limiar 10 tasks) e inicia negociação.
+
+    MA->>MB: 1. Solicita Ajuda {TASK: "WORKER_REQUEST"}
+    activate MB
+
+    alt Master B disponível (Sucesso)
+        MB-->>MA: 2. Resposta Positiva {RESPONSE: "AVAILABLE", WORKERS: ["uuid_B1"]}
+        MB->>W: 3. Ordena Redirecionamento {TASK: "REDIRECT", MASTER_REDIRECT: "ID_A"}
+        deactivate MB
+        Note over W: Worker B1 desconecta do Master B.
+        
+        W->>MA: 4. Conecta/Registra {WORKER: "ALIVE", MASTER_ORIGIN: "ID_B"}
+        activate MA
+        Note over MA,W: Worker B1 agora trabalha para Master A.
+        MA-->>W: 5. Confirma Conexão (Implícito)
+        deactivate MA
+        
+    else Master B indisponível (Falha)
+        MB-->>MA: 2. Resposta Negativa {RESPONSE: "UNAVAILABLE"}
+        Note over MB: Conexão encerrada após resposta.
+        MA->>MA: Tenta Outro Master Vizinho
+    end
