@@ -5,17 +5,14 @@ import time
 import uuid
 import logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 
 WORKER_ID = str(uuid.uuid4())
-HOST = "127.0.0.1"
+HOST = "10.62.217.201"
 PORT = 6000
-MASTER_HOST = "127.0.0.1"
+MASTER_HOST = "10.62.217.204"
 MASTER_PORT = 5000
+ORIGINAL_MASTER = (MASTER_HOST, MASTER_PORT)
 active_tasks = 0
 lock = threading.Lock()
 
@@ -55,18 +52,31 @@ def process_task(task, master_host=None, master_port=None):
     global active_tasks
     with lock:
         if active_tasks >= 1:
-            logging.warning("Limite de tasks simultâneas atingido, aguardando...")
             return
         active_tasks += 1
-
     logging.info(f"Executando {task['task_id']}: {task['numbers']}")
     time.sleep(10)
     result = sum(task['numbers'])
     logging.info(f"Concluído {task['task_id']} = {result}")
     report_result(task['task_id'], result, master_host, master_port)
-
     with lock:
         active_tasks -= 1
+        if active_tasks == 0 and (MASTER_HOST, MASTER_PORT) != ORIGINAL_MASTER:
+            return_to_original_master()
+
+
+def return_to_original_master():
+    global MASTER_HOST, MASTER_PORT
+    host, port = ORIGINAL_MASTER
+    try:
+        with socket.socket() as s:
+            s.connect((MASTER_HOST, MASTER_PORT))
+            send_json(s, {"type": "worker_returning", "worker_id": WORKER_ID})
+        logging.info(f"Retornando ao Master original {host}:{port}")
+        MASTER_HOST, MASTER_PORT = host, port
+        register_master()
+    except Exception as e:
+        logging.error(f"Erro ao retornar ao master original {host}:{port} - {e}")
 
 
 def worker_server():
@@ -81,7 +91,6 @@ def worker_server():
             if msg.get("type") == "assign_task":
                 master_host = msg.get("MASTER_HOST")
                 master_port = msg.get("MASTER_PORT")
-                logging.info(f"Tarefa recebida de {master_host}:{master_port}")
                 threading.Thread(target=process_task, args=(msg['payload'], master_host, master_port), daemon=True).start()
             elif msg.get("TASK") == "REDIRECT":
                 master_host = msg["host"]
