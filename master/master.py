@@ -4,6 +4,13 @@ import threading
 import time
 import uuid
 import random
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
 
 MASTER_ID = str(uuid.uuid4())
 PORT = 5000
@@ -26,12 +33,13 @@ def send_json(sock, obj):
 def handle_client(conn, addr):
     try:
         msg = json.loads(conn.recv(4096).decode())
+
         if msg.get("type") == "MASTER_ALIVE":
             master_id = msg.get("MASTER_ID")
             with lock:
                 known_masters[master_id] = {"host": addr[0], "last_seen": time.time()}
             send_json(conn, {"type": "ALIVE_ACK", "MASTER_ID": MASTER_ID})
-            print(f"[{MASTER_ID}] Recebeu heartbeat do Master {master_id}")
+            logging.info(f"Recebeu heartbeat do Master {master_id}")
             return
 
         elif msg.get("type") == "ALIVE_ACK":
@@ -39,7 +47,7 @@ def handle_client(conn, addr):
             with lock:
                 if mid in known_masters:
                     known_masters[mid]["last_seen"] = time.time()
-            print(f"[{MASTER_ID}] {mid} respondeu o heartbeat")
+            logging.info(f"{mid} respondeu o heartbeat")
             return
 
         if msg.get("type") == "register_worker":
@@ -47,7 +55,7 @@ def handle_client(conn, addr):
             port = msg.get("port", 6000)
             with lock:
                 workers[wid] = {"host": addr[0], "port": port, "status": "PARADO"}
-            print(f"[{MASTER_ID}] Worker {wid} registrado ({addr[0]}:{port})")
+            logging.info(f"Worker {wid} registrado ({addr[0]}:{port})")
             send_json(conn, {"status": "registered"})
 
         elif msg.get("WORKER") == "ALIVE":
@@ -57,13 +65,13 @@ def handle_client(conn, addr):
             worker_port = msg.get("port", 6000)
             with lock:
                 workers[wid] = {"host": worker_host, "port": worker_port, "status": "PARADO"}
-            print(f"[{MASTER_ID}] Worker redirecionado do {origin}: {wid}")
+            logging.info(f"Worker redirecionado do {origin}: {wid}")
 
         elif msg.get("type") == "task_result":
             wid = msg["worker_id"]
             task_id = msg["task_id"]
             result = msg["result"]
-            print(f"[{MASTER_ID}] Resultado de {wid}: {task_id} = {result}")
+            logging.info(f"Resultado de {wid}: {task_id} = {result}")
             with lock:
                 if wid in workers:
                     workers[wid]["status"] = "PARADO"
@@ -84,12 +92,13 @@ def handle_client(conn, addr):
                     "MASTER": MASTER_ID,
                     "WORKERS": offered
                 })
-                print(f"[{MASTER_ID}] Ofereceu {len(offered)} worker(s) para {requester}")
+                logging.info(f"Ofereceu {len(offered)} worker(s) para {requester}")
             else:
                 send_json(conn, {"RESPONSE": "UNAVAILABLE", "MASTER": MASTER_ID})
+                logging.info(f"Sem workers disponíveis para {requester}")
 
     except Exception as e:
-        print(f"[{MASTER_ID}] ERRO handle_client: {e}")
+        logging.error(f"ERRO handle_client: {e}")
     finally:
         conn.close()
 
@@ -98,7 +107,7 @@ def start_master_server():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind((HOST, PORT))
     s.listen(10)
-    print(f"[{MASTER_ID}] Servidor ativo em {HOST}:{PORT}")
+    logging.info(f"Servidor ativo em {HOST}:{PORT}")
     while True:
         conn, addr = s.accept()
         threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
@@ -116,9 +125,9 @@ def master_heartbeat():
                     mid = response["MASTER_ID"]
                     with lock:
                         known_masters[mid] = {"host": NEIGHBOR_MASTER[0], "last_seen": time.time()}
-                    print(f"[{MASTER_ID}] Heartbeat OK com {mid}")
+                    logging.info(f"Heartbeat OK com {mid}")
         except Exception as e:
-            print(f"[{MASTER_ID}] Falha no heartbeat com {NEIGHBOR_MASTER[0]}: {e}")
+            logging.warning(f"Falha no heartbeat com {NEIGHBOR_MASTER[0]}: {e}")
         time.sleep(HEARTBEAT_INTERVAL)
 
 
@@ -128,7 +137,7 @@ def monitor_masters():
         with lock:
             inactive = [mid for mid, info in known_masters.items() if now - info["last_seen"] > HEARTBEAT_TIMEOUT]
             for mid in inactive:
-                print(f"[{MASTER_ID}] Master {mid} INATIVO (sem heartbeat há mais de {HEARTBEAT_TIMEOUT}s)")
+                logging.warning(f"Master {mid} inativo há mais de {HEARTBEAT_TIMEOUT}s")
                 del known_masters[mid]
         time.sleep(5)
 
@@ -151,9 +160,9 @@ def distribute_tasks():
                             "MASTER_PORT": PORT
                         })
                     workers[wid]["status"] = "OCUPADO"
-                    print(f"[{MASTER_ID}] Enviou {task['task_id']} para {wid}: {task['numbers']}")
+                    logging.info(f"Enviou {task['task_id']} para {wid}: {task['numbers']}")
                 except Exception as e:
-                    print(f"[{MASTER_ID}] ERRO enviando tarefa para {wid}: {e}")
+                    logging.error(f"Erro enviando tarefa para {wid}: {e}")
                     workers.pop(wid, None)
         time.sleep(1)
 
@@ -164,7 +173,7 @@ def monitor_load():
         with lock:
             count = len(pending_tasks)
         if count > THRESHOLD:
-            print(f"[{MASTER_ID}] ALERTA: {count} tarefas pendentes! Solicitando suporte...")
+            logging.warning(f"ALERTA: {count} tarefas pendentes! Solicitando suporte...")
             request_support()
 
 
@@ -182,11 +191,11 @@ def request_support():
                     port = w["port"]
                     with lock:
                         workers[wid] = {"host": host, "port": port, "status": "PARADO"}
-                    print(f"[{MASTER_ID}] Worker emprestado registrado: {wid} ({host}:{port})")
+                    logging.info(f"Worker emprestado registrado: {wid} ({host}:{port})")
             else:
-                print(f"[{MASTER_ID}] Sem suporte disponível do {response['MASTER']}")
+                logging.info(f"Sem suporte disponível do {response['MASTER']}")
     except Exception as e:
-        print(f"[{MASTER_ID}] ERRO solicitando suporte: {e}")
+        logging.error(f"Erro solicitando suporte: {e}")
 
 
 def generate_tasks():
@@ -195,6 +204,7 @@ def generate_tasks():
         task = {"task_id": f"T{i}", "numbers": [random.randint(1, 100) for _ in range(5)]}
         with lock:
             pending_tasks.append(task)
+        logging.debug(f"Tarefa gerada: {task['task_id']}")
         i += 1
         time.sleep(2)
 
@@ -212,4 +222,5 @@ if __name__ == "__main__":
         with lock:
             active_workers = len(workers)
             active_masters = len(known_masters)
-            print(f"[{MASTER_ID}] Pendentes: {len(pending_tasks)} | Workers: {active_workers} | Masters ativos: {active_masters}")
+            pending = len(pending_tasks)
+        logging.info(f"Pendentes: {pending} | Workers: {active_workers} | Masters ativos: {active_masters}")
