@@ -200,7 +200,7 @@ def check_return_workers():
 def generate_tasks():
     i = 1
     while True:
-        task = {"task_id": f"T{i}", "numbers": [random.randint(1, 100) for _ in range(5)]}
+        task = {"task_id": f"T{i}", "workload": [random.randint(1, 100)]}
         with lock:
             pending_tasks.append(task)
         i += 1

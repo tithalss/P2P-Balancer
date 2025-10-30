@@ -8,7 +8,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 
 WORKER_ID = str(uuid.uuid4())
-HOST = "10.62.217.201"
+HOST = "10.62.217.16"
 PORT = 6000
 MASTER_HOST = "10.62.217.204"
 MASTER_PORT = 5000
@@ -27,10 +27,16 @@ def register_master(host=None, port=None):
         MASTER_HOST = host
     if port:
         MASTER_PORT = port
+    payload = {
+        "MASTER": MASTER_HOST,
+        "MASTER_ORIGIN": MASTER_HOST,
+        "WORKER": "ALIVE",
+        "WORKER_UUID": WORKER_ID
+    }
     try:
         with socket.socket() as s:
             s.connect((MASTER_HOST, MASTER_PORT))
-            send_json(s, {"type": "register_worker", "worker_id": WORKER_ID, "port": PORT})
+            send_json(s, payload)
             logging.info(f"Registrado no Master {MASTER_HOST}:{MASTER_PORT}")
     except Exception as e:
         logging.error(f"Falha ao registrar no master {MASTER_HOST}:{MASTER_PORT} - {e}")
@@ -54,11 +60,10 @@ def process_task(task, master_host=None, master_port=None):
         if active_tasks >= 1:
             return
         active_tasks += 1
-    logging.info(f"Executando {task['task_id']}: {task['numbers']}")
-    time.sleep(10)
-    result = sum(task['numbers'])
-    logging.info(f"Concluído {task['task_id']} = {result}")
-    report_result(task['task_id'], result, master_host, master_port)
+    logging.info(f"Executando {task['task_id']}: {task['workload']}")
+    time.sleep(1)
+    logging.info(f"Task concluída {task['task_id']}")
+    report_result(task['task_id'], master_host, master_port)
     with lock:
         active_tasks -= 1
         if active_tasks == 0 and (MASTER_HOST, MASTER_PORT) != ORIGINAL_MASTER:
