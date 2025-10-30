@@ -30,18 +30,15 @@ def handle_client(conn, addr):
     try:
         msg = json.loads(conn.recv(4096).decode())
 
-        if msg.get("type") == "MASTER_ALIVE":
-            master_id = msg.get("MASTER_ID")
+        if msg.get("SERVER") == "ALIVE" and msg.get("TASK") == "REQUEST":
+            send_json(conn, {"SERVER": "ALIVE", "TASK": "RECIEVE"})
             with lock:
-                known_masters[master_id] = {"host": addr[0], "last_seen": time.time()}
-            send_json(conn, {"type": "ALIVE_ACK", "MASTER_ID": MASTER_ID})
+                known_masters[addr[0]] = {"last_seen": time.time()}
             return
 
-        elif msg.get("type") == "ALIVE_ACK":
-            mid = msg.get("MASTER_ID")
+        if msg.get("SERVER") == "ALIVE" and msg.get("TASK") == "RECIEVE":
             with lock:
-                if mid in known_masters:
-                    known_masters[mid]["last_seen"] = time.time()
+                known_masters[addr[0]] = {"last_seen": time.time()}
             return
 
         if msg.get("type") == "register_worker":
@@ -51,48 +48,35 @@ def handle_client(conn, addr):
                 workers[wid] = {"host": addr[0], "port": port, "status": "PARADO", "emprestado": False, "original_master": None}
             send_json(conn, {"status": "registered"})
 
-        elif msg.get("type") == "worker_returning":
-            wid = msg["worker_id"]
-            with lock:
-                if wid in workers:
-                    workers[wid]["emprestado"] = False
-                    workers[wid]["original_master"] = None
-            logging.info(f"Worker {wid} retornou ao master original")
-
-        elif msg.get("WORKER") == "ALIVE":
-            wid = msg.get("WORKER_UUID")
-            origin = msg.get("MASTER_ORIGIN")
-            worker_host = addr[0]
-            worker_port = msg.get("port", 6000)
-            with lock:
-                workers[wid] = {"host": worker_host, "port": worker_port, "status": "PARADO", "emprestado": True, "original_master": origin}
-            logging.info(f"Worker redirecionado de {origin}: {wid}")
-
-        elif msg.get("type") == "task_result":
-            wid = msg["worker_id"]
-            task_id = msg["task_id"]
-            result = msg["result"]
-            logging.info(f"Resultado de {wid}: {task_id} = {result}")
-            with lock:
-                if wid in workers:
-                    workers[wid]["status"] = "PARADO"
-
-        elif msg.get("TASK") == "WORKER_REQUEST":
-            requester = msg.get("MASTER")
+        if msg.get("TASK") == "WORKER_REQUEST":
+            n = msg.get("WORKERS_NEEDED", 1)
             with lock:
                 available = [(wid, w) for wid, w in workers.items() if w["status"] == "PARADO" and not w["emprestado"]]
             if available:
                 offered = []
-                for wid, w in available:
+                for wid, w in available[:n]:
                     offered.append({"WORKER_UUID": wid, "host": w["host"], "port": w["port"], "MASTER_ORIGIN": HOST})
                     workers[wid]["status"] = "TRANSFERIDO"
                     workers[wid]["emprestado"] = True
                     workers[wid]["original_master"] = HOST
-                send_json(conn, {"RESPONSE": "AVAILABLE", "MASTER": MASTER_ID, "WORKERS": offered})
+                send_json(conn, {"TASK": "WORKER_RESPONSE", "STATUS": "ACK", "MASTER_UUID": MASTER_ID, "WORKERS": offered})
             else:
-                send_json(conn, {"RESPONSE": "UNAVAILABLE", "MASTER": MASTER_ID})
+                send_json(conn, {"TASK": "WORKER_RESPONSE", "STATUS": "NACK", "WORKERS": []})
+
+        if msg.get("WORKER") == "ALIVE":
+            wid = msg.get("WORKER_UUID")
+            with lock:
+                workers[wid] = {"host": addr[0], "port": 6000, "status": "PARADO", "emprestado": True, "original_master": None}
+
+        if msg.get("type") == "task_result":
+            wid = msg["worker_id"]
+            task_id = msg["task_id"]
+            with lock:
+                if wid in workers:
+                    workers[wid]["status"] = "PARADO"
+
     except Exception as e:
-        logging.error(f"ERRO handle_client: {e}")
+        logging.error(f"ERRO: {e}")
     finally:
         conn.close()
 
@@ -101,24 +85,18 @@ def start_master_server():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind((HOST, PORT))
     s.listen(10)
-    logging.info(f"Servidor ativo em {HOST}:{PORT}")
     while True:
         conn, addr = s.accept()
         threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
 
-def master_heartbeat():
+def heartbeat():
     while True:
         try:
             with socket.socket() as s:
-                s.settimeout(5)
                 s.connect(NEIGHBOR_MASTER)
-                send_json(s, {"type": "MASTER_ALIVE", "MASTER_ID": MASTER_ID})
-                response = json.loads(s.recv(4096).decode())
-                if response.get("type") == "ALIVE_ACK":
-                    mid = response["MASTER_ID"]
-                    with lock:
-                        known_masters[mid] = {"host": NEIGHBOR_MASTER[0], "last_seen": time.time()}
+                send_json(s, {"SERVER": "ALIVE", "TASK": "REQUEST"})
+                s.recv(4096)
         except:
             pass
         time.sleep(HEARTBEAT_INTERVAL)
@@ -128,9 +106,9 @@ def monitor_masters():
     while True:
         now = time.time()
         with lock:
-            inactive = [mid for mid, info in known_masters.items() if now - info["last_seen"] > HEARTBEAT_TIMEOUT]
-            for mid in inactive:
-                del known_masters[mid]
+            inactive = [m for m, i in known_masters.items() if now - i["last_seen"] > HEARTBEAT_TIMEOUT]
+            for m in inactive:
+                del known_masters[m]
         time.sleep(5)
 
 
@@ -154,62 +132,40 @@ def distribute_tasks():
 
 def monitor_load():
     while True:
-        time.sleep(3)
         with lock:
             count = len(pending_tasks)
         if count > THRESHOLD:
             request_support()
-        else:
-            check_return_workers()
+        time.sleep(3)
 
 
 def request_support():
     try:
         with socket.socket() as s:
             s.connect(NEIGHBOR_MASTER)
-            send_json(s, {"MASTER": MASTER_ID, "TASK": "WORKER_REQUEST"})
+            send_json(s, {"TASK": "WORKER_REQUEST", "WORKERS_NEEDED": 5})
             response = json.loads(s.recv(4096).decode())
-            if response.get("RESPONSE") == "AVAILABLE":
+            if response.get("TASK") == "WORKER_RESPONSE" and response.get("STATUS") == "ACK":
                 for w in response["WORKERS"]:
                     wid = w["WORKER_UUID"]
-                    host = w["host"]
-                    port = w["port"]
-                    origin = w["MASTER_ORIGIN"]
                     with lock:
-                        workers[wid] = {"host": host, "port": port, "status": "PARADO", "emprestado": True, "original_master": origin}
-            else:
-                pass
+                        workers[wid] = {"host": w["host"], "port": w["port"], "status": "PARADO", "emprestado": True, "original_master": w["MASTER_ORIGIN"]}
     except:
         pass
-
-
-def check_return_workers():
-    with lock:
-        if not pending_tasks:
-            for wid, w in list(workers.items()):
-                if w["emprestado"]:
-                    try:
-                        with socket.socket() as s:
-                            s.connect((w["host"], w["port"]))
-                            send_json(s, {"TASK": "REDIRECT", "host": w["original_master"], "port": PORT})
-                        del workers[wid]
-                    except:
-                        pass
 
 
 def generate_tasks():
     i = 1
     while True:
-        task = {"task_id": f"T{i}", "workload": [random.randint(1, 100)]}
         with lock:
-            pending_tasks.append(task)
+            pending_tasks.append({"task_id": f"T{i}", "workload": [random.randint(1, 100)]})
         i += 1
         time.sleep(2)
 
 
 if __name__ == "__main__":
     threading.Thread(target=start_master_server, daemon=True).start()
-    threading.Thread(target=master_heartbeat, daemon=True).start()
+    threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=monitor_masters, daemon=True).start()
     threading.Thread(target=distribute_tasks, daemon=True).start()
     threading.Thread(target=monitor_load, daemon=True).start()
@@ -217,7 +173,4 @@ if __name__ == "__main__":
     while True:
         time.sleep(10)
         with lock:
-            active_workers = len(workers)
-            active_masters = len(known_masters)
-            pending = len(pending_tasks)
-        logging.info(f"Pendentes: {pending} | Workers: {active_workers} | Masters ativos: {active_masters}")
+            logging.info(f"Pendentes: {len(pending_tasks)} | Workers: {len(workers)} | Masters ativos: {len(known_masters)}")
