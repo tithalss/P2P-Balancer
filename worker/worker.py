@@ -6,7 +6,7 @@ import uuid
 
 WORKER_ID = str(uuid.uuid4())
 HOST = "127.0.0.1"
-PORT = 6001
+PORT = 6000
 MASTER_HOST = "127.0.0.1"
 MASTER_PORT = 5000
 active_tasks = 0
