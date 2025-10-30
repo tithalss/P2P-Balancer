@@ -5,7 +5,11 @@ import time
 import uuid
 import logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
 
 WORKER_ID = str(uuid.uuid4())
 HOST = "10.62.217.16"
@@ -26,8 +30,9 @@ def register_master():
         with socket.socket() as s:
             s.connect((MASTER_HOST, MASTER_PORT))
             send_json(s, payload)
-    except:
-        pass
+            logging.info(f"[REGISTER] Registrado no master {MASTER_HOST}:{MASTER_PORT}")
+    except Exception as e:
+        logging.error(f"[REGISTER] Falha ao registrar: {e}")
 
 
 def report_result(task_id):
@@ -35,34 +40,41 @@ def report_result(task_id):
         with socket.socket() as s:
             s.connect((MASTER_HOST, MASTER_PORT))
             send_json(s, {"type": "task_result", "worker_id": WORKER_ID, "task_id": task_id})
-    except:
-        pass
+            logging.info(f"[TASK_RESULT] Task {task_id} concluída e enviada ao master")
+    except Exception as e:
+        logging.error(f"[TASK_RESULT] Erro ao enviar resultado: {e}")
 
 
 def process_task(task):
     global active_tasks
     with lock:
         if active_tasks >= 1:
+            logging.warning("[WORKER] Ocupado, não pode aceitar nova tarefa")
             return
         active_tasks += 1
+
+    logging.info(f"[TASK] Iniciando {task['task_id']} - workload={task['workload']}")
     time.sleep(2)
     report_result(task["task_id"])
     with lock:
         active_tasks -= 1
+    logging.info(f"[TASK] Finalizada {task['task_id']}")
 
 
 def worker_server():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind((HOST, PORT))
     s.listen(5)
+    logging.info(f"[WORKER] Ativo em {HOST}:{PORT}")
     while True:
-        conn, _ = s.accept()
+        conn, addr = s.accept()
         try:
             msg = json.loads(conn.recv(4096).decode())
+            logging.info(f"[RECV] {addr} -> {msg}")
             if msg.get("type") == "assign_task":
                 threading.Thread(target=process_task, args=(msg["payload"],), daemon=True).start()
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"[WORKER] Erro ao processar mensagem: {e}")
         finally:
             conn.close()
 
