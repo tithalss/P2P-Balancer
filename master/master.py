@@ -68,148 +68,215 @@ def handle_client(conn, addr):
             return
         logging.info(f"[RECV] {addr} -> {msg}")
 
-        if msg.get("SERVER") == "ALIVE" and msg.get("TASK") == "REQUEST":
-            send_json(conn, {"SERVER": "ALIVE", "TASK": "RECIEVE"})
+        # 1.1 | Heartbeat REQUEST (A → B)
+        if msg.get("TASK") == "HEARTBEAT" and "RESPONSE" not in msg:
+            response = {
+                "SERVER_UUID": MASTER_ID,
+                "TASK": "HEARTBEAT",
+                "RESPONSE": "ALIVE"
+            }
+            send_json(conn, response)
             with lock:
                 known_masters[addr[0]] = {"last_seen": time.time()}
-            logging.info(f"[HEARTBEAT] Recebido REQUEST de {addr[0]}")
+            logging.info(f"[HEARTBEAT] Recebido REQUEST de {addr[0]}, respondido ALIVE")
             return
 
-        if msg.get("SERVER") == "ALIVE" and msg.get("TASK") == "RECIEVE":
+        # 1.2 | Heartbeat RESPONSE (B → A)
+        if msg.get("TASK") == "HEARTBEAT" and msg.get("RESPONSE") == "ALIVE":
             with lock:
                 known_masters[addr[0]] = {"last_seen": time.time()}
-            logging.info(f"[HEARTBEAT] Recebido RECIEVE de {addr[0]}")
+            logging.info(f"[HEARTBEAT] Recebido RESPONSE ALIVE de {addr[0]}")
             return
 
-        if msg.get("type") == "register_worker":
-            wid = msg["worker_id"]
-            port = msg.get("port", 6000)
-            with lock:
-                workers_filhos[wid] = {
-                    "host": addr[0],
-                    "port": port,
-                    "status": "PARADO"
-                }
-            send_json(conn, {"status": "registered"})
-            logging.info(f"[WORKER FILHO] Registrado {wid} de {addr[0]}:{port}")
-            return
-
-        if msg.get("TASK") == "WORKER_REQUEST":
-            needed = msg.get("WORKERS_NEEDED", 1)
-            logging.info(f"[WORKER_REQUEST] Pedido de {needed} workers vindo de {addr[0]}")
-            with lock:
-                available = [(wid, w) for wid, w in workers_filhos.items() if w["status"] == "PARADO"]
-
-            if available:
-                offered = []
-                for wid, w in available[:needed]:
-                    offered.append({
-                        "WORKER_UUID": wid,
-                        "host": w["host"],
-                        "port": w["port"],
-                        "MASTER_ORIGIN": HOST
-                    })
-                    with lock:
-                        # marcar como transferido (não disponível localmente)
-                        workers_filhos[wid]["status"] = "TRANSFERIDO"
-
-                response = {
-                    "TASK": "WORKER_RESPONSE",
-                    "STATUS": "ACK",
-                    "MASTER_UUID": MASTER_ID,
-                    "WORKERS": offered
-                }
-                send_json(conn, response)
-                logging.info(f"[WORKER_RESPONSE] Enviando ACK com {len(offered)} workers")
-            else:
-                response = {"TASK": "WORKER_RESPONSE", "STATUS": "NACK", "WORKERS": []}
-                send_json(conn, response)
-                logging.warning(f"[WORKER_RESPONSE] NACK - sem workers disponíveis")
-            return
-
-        # |5.4| Worker → Servidor (re-registro WORKER ALIVE)
-        if msg.get("WORKER") == "ALIVE":
+        # 2.1 | Pedir Tarefa (Worker → Servidor) - Worker normal
+        if msg.get("WORKER") == "ALIVE" and "SERVER_UUID" not in msg:
             wid = msg.get("WORKER_UUID")
-            port = msg.get("port", 6000)
-            origin = msg.get("MASTER_ORIGIN")
-            
             with lock:
                 if wid in workers_filhos:
-                    # Worker filho re-registrou (ou retornou de transferência)
                     workers_filhos[wid]["status"] = "PARADO"
-                    logging.info(f"[WORKER FILHO] {wid} PARADO")
+                    idle_workers = [w for w in workers_filhos.values() if w["status"] == "PARADO"]
+                    logging.info(f"[WORKER FILHO] {wid} pede tarefa. Workers ociosos: {len(idle_workers)}")
+                    
+                    # Verifica se há tarefas pendentes
+                    if pending_tasks:
+                        task = pending_tasks.pop(0)
+                        workers_filhos[wid]["status"] = "OCUPADO"
+                        # 2.2 | Entregar Tarefa
+                        response = {
+                            "TASK": "QUERY",
+                            "USER": task.get("workload")
+                        }
+                        send_json(conn, response)
+                        logging.info(f"[TASK] Entregue {task['task_id']} para worker {wid}")
+                    else:
+                        # 2.3 | Sem Tarefa
+                        send_json(conn, {"TASK": "NO_TASK"})
+                        logging.info(f"[NO_TASK] Sem tarefas para worker {wid}")
                 else:
-                    # Novo worker (emprestado para este master)
+                    # Novo worker se registrando
+                    port = msg.get("port", 6000)
+                    workers_filhos[wid] = {
+                        "host": addr[0],
+                        "port": port,
+                        "status": "PARADO"
+                    }
+                    send_json(conn, {"TASK": "NO_TASK"})
+                    logging.info(f"[WORKER FILHO] Registrado {wid} de {addr[0]}:{port}")
+            return
+
+        # 2.1b | Pedir Tarefa - Emprestado (Worker → Servidor)
+        if msg.get("WORKER") == "ALIVE" and "SERVER_UUID" in msg:
+            wid = msg.get("WORKER_UUID")
+            origin_server = msg.get("SERVER_UUID")
+            port = msg.get("port", 6000)
+            
+            with lock:
+                if wid not in workers_emprestados:
+                    # Novo worker emprestado se registrando
                     workers_emprestados[wid] = {
                         "host": addr[0],
                         "port": port,
                         "status": "PARADO",
-                        "original_master": origin
+                        "original_master": origin_server
                     }
-                    logging.info(f"[WORKER EMPRESTADO] Ativo: {wid} (origin={origin})")
-            
-            # Se estava aguardando retorno, notifica o master que emprestou (|5.5|)
-            with lock:
-                if wid in pending_releases:
-                    requester = pending_releases.pop(wid)
+                    logging.info(f"[WORKER EMPRESTADO] Registrado {wid} de servidor {origin_server}")
+                    
+                    # Notifica master de origem que worker chegou (4.3)
                     threading.Thread(
-                        target=notify_worker_returned, 
-                        args=(requester, wid), 
+                        target=notify_worker_returned,
+                        args=(origin_server, wid),
                         daemon=True
                     ).start()
+                else:
+                    workers_emprestados[wid]["status"] = "PARADO"
+                
+                # Verifica se há tarefas pendentes
+                if pending_tasks:
+                    task = pending_tasks.pop(0)
+                    workers_emprestados[wid]["status"] = "OCUPADO"
+                    # 2.2 | Entregar Tarefa
+                    response = {
+                        "TASK": "QUERY",
+                        "USER": task.get("workload")
+                    }
+                    send_json(conn, response)
+                    logging.info(f"[TASK] Entregue {task['task_id']} para worker emprestado {wid}")
+                else:
+                    # 2.3 | Sem Tarefa
+                    send_json(conn, {"TASK": "NO_TASK"})
+                    logging.info(f"[NO_TASK] Sem tarefas para worker emprestado {wid}")
             return
 
-        if msg.get("type") == "task_result":
-            wid = msg["worker_id"]
-            task_id = msg["task_id"]
+        # 3.1 | Pedido de Worker (A → B)
+        if msg.get("TASK") == "WORKER_REQUEST":
+            requestor_info = msg.get("REQUESTOR_INFO", {})
+            requestor_ip = requestor_info.get("ip", addr[0])
+            requestor_port = requestor_info.get("port", 5001)
+            
+            logging.info(f"[WORKER_REQUEST] Pedido de workers de {requestor_ip}:{requestor_port}")
+            
+            with lock:
+                available = [(wid, w) for wid, w in workers_filhos.items() if w["status"] == "PARADO"]
+
+            if available and len(available) >= 1:  # Empresta se tiver pelo menos 1 disponível
+                # Oferece até 2 workers (ou quantos tiver disponível)
+                to_offer = available[:min(2, len(available))]
+                offered_uuids = []
+                
+                logging.info(f"[EMPRÉSTIMO] Iniciando empréstimo de {len(to_offer)} workers para {requestor_ip}:{requestor_port}")
+                
+                for wid, w in to_offer:
+                    offered_uuids.append(wid)
+                    with lock:
+                        # Marcar como transferido
+                        workers_filhos[wid]["status"] = "TRANSFERIDO"
+                    
+                    logging.info(f"[EMPRÉSTIMO] Redirecionando worker {wid} para {requestor_ip}:{requestor_port}")
+                    
+                    # 2.6 | Comando: Redirecionar (Servidor Dono → Worker)
+                    threading.Thread(
+                        target=send_redirect_to_worker,
+                        args=(wid, w, requestor_ip, requestor_port),
+                        daemon=True
+                    ).start()
+                
+                # 3.2 | Resposta Disponível (B → A)
+                response = {
+                    "SERVER_UUID": MASTER_ID,
+                    "RESPONSE": "AVAILABLE",
+                    "WORKERS_UUID": offered_uuids
+                }
+                send_json(conn, response)
+                logging.info(f"[WORKER_RESPONSE] Enviando AVAILABLE com {len(offered_uuids)} workers")
+            else:
+                # 3.3 | Resposta Indisponível (B → A)
+                response = {
+                    "SERVER_UUID": MASTER_ID,
+                    "RESPONSE": "UNAVAILABLE"
+                }
+                send_json(conn, response)
+                logging.warning(f"[WORKER_RESPONSE] UNAVAILABLE - sem workers disponíveis para emprestar")
+            return
+
+        # 2.4 | Reportar Status (Worker → Servidor)
+        if msg.get("STATUS") in ["OK", "NOK"]:
+            wid = msg.get("WORKER_UUID")
+            task_status = msg.get("STATUS")
+            task_type = msg.get("TASK")
+            
             with lock:
                 if wid in workers_filhos:
                     workers_filhos[wid]["status"] = "PARADO"
-                if wid in workers_emprestados:
+                elif wid in workers_emprestados:
                     workers_emprestados[wid]["status"] = "PARADO"
-            logging.info(f"[TASK] Resultado recebido de {wid} (task {task_id})")
+            
+            # 2.5 | Confirmar Status (Servidor → Worker)
+            send_json(conn, {"STATUS": "ACK"})
+            logging.info(f"[STATUS] Worker {wid} reportou {task_status} para tarefa {task_type}")
             return
 
-        # |5.1| Servidor A → Servidor B – COMMAND_RELEASE
+        # 4.1 | Notificar Liberação (A → B)
         if msg.get("TASK") == "COMMAND_RELEASE":
-            requester_master = msg.get("MASTER")
-            worker_list = msg.get("WORKERS", [])
-            logging.info(f"[COMMAND_RELEASE] Recebido de {requester_master} para workers {worker_list}")
+            requester_uuid = msg.get("SERVER_UUID")
+            requester_info = msg.get("REQUESTOR_INFO", {})
+            requester_port = requester_info.get("port", NEIGHBOR_MASTER[1])
+            worker_list = msg.get("WORKERS_UUID", [])
+            logging.info(f"[COMMAND_RELEASE] Recebido de {requester_uuid} para workers {worker_list}")
             
-            # |5.2| Confirma recebimento
+            # 4.2 | Confirmar Liberação (B → A)
             ack = {
-                "MASTER": MASTER_ID,
+                "SERVER_UUID": MASTER_ID,
                 "RESPONSE": "RELEASE_ACK",
-                "WORKERS": worker_list
+                "WORKERS_UUID": worker_list
             }
             send_json(conn, ack)
-            logging.info(f"[RELEASE_ACK] Enviado para {requester_master}")
+            logging.info(f"[RELEASE_ACK] Enviado para {requester_uuid}")
             
             # Marca workers como pendentes de retorno
             with lock:
                 for wid in worker_list:
-                    pending_releases[wid] = requester_master
+                    pending_releases[wid] = addr[0]
             
-            # |5.3| Ordena retorno aos workers
+            # Envia comando RETURN aos workers (2.7)
             threading.Thread(
                 target=order_workers_return, 
-                args=(worker_list,), 
+                args=(worker_list, addr[0], requester_port), 
                 daemon=True
             ).start()
             return
 
-        # |5.5| Confirmação de retorno completo
-        if msg.get("RESPONSE") == "WORKER_RETURNED":
-            origin = msg.get("MASTER")
-            worker_list = msg.get("WORKERS", [])
-            logging.info(f"[WORKER_RETURNED] Recebido de {origin}: workers {worker_list} retornaram")
+        # 4.3 | Confirmar Recebimento (B → A) - Worker disponível/retornou
+        if msg.get("RESPONSE") == "RELEASE_COMPLETED":
+            origin_uuid = msg.get("SERVER_UUID")
+            worker_list = msg.get("WORKERS_UUID", [])
+            logging.info(f"[RELEASE_COMPLETED] Recebido de {origin_uuid}: workers {worker_list} estão disponíveis/retornaram")
             
-            # Remove workers emprestados da lista
+            # Marca workers como disponíveis novamente (caso tenham sido TRANSFERIDO)
             with lock:
                 for wid in worker_list:
-                    if wid in workers_emprestados:
-                        logging.info(f"[CLEANUP] Removendo worker emprestado {wid}")
-                        workers_emprestados.pop(wid, None)
+                    if wid in workers_filhos and workers_filhos[wid]["status"] == "TRANSFERIDO":
+                        workers_filhos[wid]["status"] = "PARADO"
+                        logging.info(f"[DISPONÍVEL] Worker {wid} retornou e está PARADO")
             return
 
     except Exception as e:
@@ -234,9 +301,13 @@ def heartbeat():
             with socket.socket() as s:
                 s.settimeout(5)
                 s.connect(NEIGHBOR_MASTER)
-                send_json(s, {"SERVER": "ALIVE", "TASK": "REQUEST"})
+                # 1.1 | Pergunta (A → B)
+                send_json(s, {
+                    "SERVER_UUID": MASTER_ID,
+                    "TASK": "HEARTBEAT"
+                })
                 response = recv_json(s)
-                logging.info(f"[HEARTBEAT] Enviado REQUEST -> {NEIGHBOR_MASTER} | Resp: {response}")
+                logging.info(f"[HEARTBEAT] Enviado para {NEIGHBOR_MASTER} | Resp: {response}")
         except Exception as e:
             logging.warning(f"[HEARTBEAT] Falha ao enviar heartbeat: {e}")
         time.sleep(HEARTBEAT_INTERVAL)
@@ -253,35 +324,103 @@ def monitor_masters():
         time.sleep(5)
 
 
+def send_redirect_to_worker(worker_id, worker_info, target_ip, target_port):
+    """Envia comando REDIRECT para worker (2.6)"""
+    payload = {
+        "TASK": "REDIRECT",
+        "SERVER_REDIRECT": {
+            "ip": target_ip,
+            "port": target_port
+        }
+    }
+    
+    try:
+        with socket.socket() as s:
+            s.settimeout(5)
+            s.connect((worker_info["host"], worker_info["port"]))
+            send_json(s, payload)
+            logging.info(f"[REDIRECT] Comando enviado para worker {worker_id} -> {target_ip}:{target_port}")
+    except Exception as e:
+        logging.error(f"[REDIRECT] Erro ao enviar comando para worker {worker_id}: {e}")
+
+
+def order_workers_return(worker_ids, return_ip, return_port):
+    """Envia comando RETURN para workers (2.7)"""
+    for wid in worker_ids:
+        with lock:
+            w = workers_emprestados.get(wid) or workers_filhos.get(wid)
+            if not w:
+                logging.warning(f"[RETURN] Worker {wid} não encontrado")
+                continue
+        
+        # 2.7 | Comando: Retornar (Servidor Temporário → Worker)
+        payload = {
+            "TASK": "RETURN",
+            "SERVER_RETURN": {
+                "ip": return_ip,
+                "port": return_port
+            }
+        }
+        
+        try:
+            with socket.socket() as s:
+                s.settimeout(5)
+                s.connect((w["host"], w["port"]))
+                send_json(s, payload)
+                logging.info(f"[RETURN] Comando enviado para worker {wid} -> {return_ip}:{return_port}")
+                
+                # Remove worker emprestado da lista local imediatamente
+                with lock:
+                    if wid in workers_emprestados:
+                        workers_emprestados.pop(wid)
+                        logging.info(f"[RETURN] Worker {wid} removido da lista de emprestados")
+                        
+        except Exception as e:
+            logging.error(f"[RETURN] Erro ao enviar comando para {wid}: {e}")
+
+
+def notify_worker_returned(origin_master_info, worker_id):
+    """Notifica master de origem que worker está disponível/retornou (4.3)"""
+    # Parse origin_master_info (pode ser "ip:port" ou só "ip")
+    try:
+        if ":" in str(origin_master_info):
+            host, port = origin_master_info.split(":")
+            target = (host, int(port))
+        else:
+            target = (origin_master_info, NEIGHBOR_MASTER[1])
+    except Exception:
+        target = NEIGHBOR_MASTER
+    
+    # 4.3 | Confirmar Recebimento (B → A)
+    payload = {
+        "SERVER_UUID": MASTER_ID,
+        "RESPONSE": "RELEASE_COMPLETED",
+        "WORKERS_UUID": [worker_id]
+    }
+    
+    logging.info(f"[RELEASE_COMPLETED] Notificando {target} sobre disponibilidade de {worker_id}")
+    
+    try:
+        with socket.socket() as s:
+            s.settimeout(5)
+            s.connect(target)
+            send_json(s, payload)
+            logging.info(f"[RELEASE_COMPLETED] Enviado para {target}")
+    except Exception as e:
+        logging.error(f"[RELEASE_COMPLETED] Erro ao notificar {target}: {e}")
+
+
 def distribute_tasks():
+    """Distribui tarefas para workers ociosos"""
     while True:
         with lock:
             all_workers = {}
             all_workers.update({wid: w for wid, w in workers_filhos.items()})
             all_workers.update({wid: w for wid, w in workers_emprestados.items()})
             idle = [wid for wid, w in all_workers.items() if w["status"] == "PARADO"]
-            while idle and pending_tasks:
-                wid = idle.pop(0)
-                task = pending_tasks.pop(0)
-                w = all_workers[wid]
-                try:
-                    with socket.socket() as s:
-                        s.connect((w["host"], w["port"]))
-                        send_json(s, {
-                            "type": "assign_task",
-                            "payload": task,
-                            "MASTER_HOST": HOST,
-                            "MASTER_PORT": PORT
-                        })
-                    if wid in workers_filhos:
-                        workers_filhos[wid]["status"] = "OCUPADO"
-                    elif wid in workers_emprestados:
-                        workers_emprestados[wid]["status"] = "OCUPADO"
-                    logging.info(f"[TASK] Enviado {task['task_id']} -> {wid}")
-                except Exception as e:
-                    logging.error(f"[TASK] Falha ao enviar tarefa para {wid}: {e}")
-                    workers_filhos.pop(wid, None)
-                    workers_emprestados.pop(wid, None)
+        
+        # Nota: A distribuição agora é feita quando o worker pede tarefa (pull model)
+        # Esta função pode ser removida ou usada para monitoramento
         time.sleep(1)
 
 
@@ -291,13 +430,15 @@ def monitor_load():
         with lock:
             count = len(pending_tasks)
             borrowed = list(workers_emprestados.keys())
+            # Conta workers filhos ociosos
+            idle_children = [wid for wid, w in workers_filhos.items() if w["status"] == "PARADO"]
         
         # Saturação: requisita suporte
         if count >= THRESHOLD:
             logging.warning(f"[LOAD] {count} tarefas pendentes - requisitando suporte")
             request_support()
         
-        # Normalização: devolve workers emprestados
+        # Normalização: devolve workers emprestados (< 10 tarefas)
         elif count < THRESHOLD and borrowed:
             logging.info(f"[LOAD] Normalizado ({count} pendentes). Devolvendo {len(borrowed)} workers")
             release_borrowed_workers(borrowed)
@@ -306,7 +447,7 @@ def monitor_load():
 
 
 def release_borrowed_workers(borrowed_ids):
-    """Inicia devolução de workers emprestados (|5.1|)"""
+    """Inicia devolução de workers emprestados (4.1)"""
     # Agrupa por master de origem
     by_origin = {}
     with lock:
@@ -317,34 +458,31 @@ def release_borrowed_workers(borrowed_ids):
                     by_origin.setdefault(origin, []).append(wid)
     
     # Envia COMMAND_RELEASE para cada master de origem
-    for origin, wid_list in by_origin.items():
+    for origin_uuid, wid_list in by_origin.items():
         # Libera em lotes
         for i in range(0, len(wid_list), RELEASE_BATCH):
             batch = wid_list[i:i+RELEASE_BATCH]
             threading.Thread(
                 target=send_release_command,
-                args=(origin, batch),
+                args=(origin_uuid, batch),
                 daemon=True
             ).start()
             time.sleep(0.5)
 
 
-def send_release_command(origin_master, worker_ids):
-    """Envia COMMAND_RELEASE ao master original (|5.1|)"""
-    # Parse origin_master (pode ser "host:port" ou só "host")
-    try:
-        if ":" in origin_master:
-            host, port = origin_master.split(":")
-            target = (host, int(port))
-        else:
-            target = (origin_master, NEIGHBOR_MASTER[1])
-    except Exception:
-        target = NEIGHBOR_MASTER
+def send_release_command(origin_uuid, worker_ids):
+    """Envia COMMAND_RELEASE ao master original (4.1)"""
+    target = NEIGHBOR_MASTER
     
+    # 4.1 | Notificar Liberação (A → B)
     payload = {
-        "MASTER": f"{HOST}:{PORT}",
+        "SERVER_UUID": MASTER_ID,
         "TASK": "COMMAND_RELEASE",
-        "WORKERS": worker_ids
+        "WORKERS_UUID": worker_ids,
+        "REQUESTOR_INFO": {
+            "ip": HOST,
+            "port": PORT
+        }
     }
     
     logging.info(f"[COMMAND_RELEASE] Enviando para {target}: {worker_ids}")
@@ -355,7 +493,7 @@ def send_release_command(origin_master, worker_ids):
             s.connect(target)
             send_json(s, payload)
             
-            # Aguarda ACK (|5.2|)
+            # Aguarda ACK (4.2)
             response = recv_json(s)
             if response and response.get("RESPONSE") == "RELEASE_ACK":
                 logging.info(f"[RELEASE_ACK] Recebido de {target}")
@@ -366,83 +504,36 @@ def send_release_command(origin_master, worker_ids):
         logging.error(f"[COMMAND_RELEASE] Erro ao enviar para {target}: {e}")
 
 
-def order_workers_return(worker_ids):
-    """Ordena workers a retornarem (|5.3|)"""
-    for wid in worker_ids:
-        with lock:
-            w = workers_emprestados.get(wid) or workers_filhos.get(wid)
-            if not w:
-                logging.warning(f"[RETURN] Worker {wid} não encontrado")
-                continue
-        
-        payload = {
-            "MASTER": MASTER_ID,
-            "TASK": "RETURN",
-            "MASTER_RETURN": f"{HOST}:{PORT}",
-            "MASTER_RETURN_HOST": HOST,
-            "MASTER_RETURN_PORT": PORT
-        }
-        
-        try:
-            with socket.socket() as s:
-                s.settimeout(5)
-                s.connect((w["host"], w["port"]))
-                send_json(s, payload)
-                logging.info(f"[RETURN] Comando enviado para worker {wid}")
-        except Exception as e:
-            logging.error(f"[RETURN] Erro ao enviar para {wid}: {e}")
-
-
-def notify_worker_returned(requester_master, worker_id):
-    """Notifica master que solicitou release que worker retornou (|5.5|)"""
-    # Parse requester_master
-    try:
-        if ":" in requester_master:
-            host, port = requester_master.split(":")
-            target = (host, int(port))
-        else:
-            target = (requester_master, NEIGHBOR_MASTER[1])
-    except Exception:
-        target = NEIGHBOR_MASTER
-    
-    payload = {
-        "MASTER": MASTER_ID,
-        "RESPONSE": "WORKER_RETURNED",
-        "WORKERS": [worker_id]
-    }
-    
-    logging.info(f"[WORKER_RETURNED] Notificando {target} sobre retorno de {worker_id}")
-    
-    try:
-        with socket.socket() as s:
-            s.settimeout(5)
-            s.connect(target)
-            send_json(s, payload)
-            logging.info(f"[WORKER_RETURNED] Enviado para {target}")
-    except Exception as e:
-        logging.error(f"[WORKER_RETURNED] Erro ao notificar {target}: {e}")
-
-
 def request_support():
+    """Solicita workers emprestados quando saturado (3.1)"""
     try:
         with socket.socket() as s:
             s.settimeout(5)
             s.connect(NEIGHBOR_MASTER)
-            send_json(s, {"TASK": "WORKER_REQUEST", "WORKERS_NEEDED": 5})
+            
+            # 3.1 | Pedido de Worker (A → B)
+            send_json(s, {
+                "TASK": "WORKER_REQUEST",
+                "REQUESTOR_INFO": {
+                    "ip": HOST,
+                    "port": PORT
+                }
+            })
+            
             response = recv_json(s)
-            if response and response.get("TASK") == "WORKER_RESPONSE" and response.get("STATUS") == "ACK":
-                for w in response["WORKERS"]:
-                    wid = w["WORKER_UUID"]
-                    with lock:
-                        workers_emprestados[wid] = {
-                            "host": w["host"],
-                            "port": w["port"],
-                            "status": "PARADO",
-                            "original_master": w.get("MASTER_ORIGIN")
-                        }
-                logging.info(f"[SUPORTE] Recebidos {len(response['WORKERS'])} workers de apoio")
+            
+            # 3.2 | Resposta Disponível
+            if response and response.get("RESPONSE") == "AVAILABLE":
+                workers_uuids = response.get("WORKERS_UUID", [])
+                logging.info(f"[SUPORTE] AVAILABLE: {len(workers_uuids)} workers serão redirecionados")
+                # Os workers se conectarão automaticamente usando payload 2.1b
+            
+            # 3.3 | Resposta Indisponível
+            elif response and response.get("RESPONSE") == "UNAVAILABLE":
+                logging.warning("[SUPORTE] UNAVAILABLE - vizinho sem workers disponíveis")
             else:
-                logging.warning("[SUPORTE] Pedido negado (NACK)")
+                logging.warning("[SUPORTE] Resposta inesperada ou timeout")
+                
     except Exception as e:
         logging.error(f"[SUPORTE] Erro ao solicitar suporte: {e}")
 
