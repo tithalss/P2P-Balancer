@@ -15,18 +15,13 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-# --- CONFIGURAÇÃO DE PORTAS DINÂMICAS ---
-# Se digitar no terminal, usa o que digitou. Se não, usa o padrão 5000/5001.
-if len(sys.argv) >= 3:
-    PORT = int(sys.argv[1])           # Porta Deste Servidor
-    neighbor_port = int(sys.argv[2])  # Porta do Vizinho
-    NEIGHBOR_MASTER = ("127.0.0.1", neighbor_port)
-else:
-    PORT = 5000
-    NEIGHBOR_MASTER = ("127.0.0.1", 5001)
 
-MASTER_ID = str(uuid.uuid4())
-HOST = "127.0.0.1"
+NEIGHBOR_MASTER = ("10.62.217.22", 5000)
+NEIGHBOR_MASTER = ("10.62.217.199", 5000)
+NEIGHBOR_MASTER = ("10.62.217.212", 5000)
+PORT = 5000
+MASTER_ID = 'SERVER_3'
+HOST = "10.62.217.16"
 THRESHOLD = 10  
 HEARTBEAT_INTERVAL = 5
 HEARTBEAT_TIMEOUT = 15
@@ -59,8 +54,10 @@ def recv_json(conn, timeout=5):
         raw = buf.decode(errors="ignore")
         return json.loads(raw.split("\n")[0])
     except Exception as e:
-        logging.error(f"[recv_json] erro parse: {e}")
-        return None
+        pass
+
+# logging.error(f"[recv_json] erro parse: {e}")
+# return None
 
 def handle_client(conn, addr):
     try:
@@ -121,7 +118,7 @@ def handle_client(conn, addr):
         if msg.get("TASK") == "WORKER_REQUEST":
             requestor_info = msg.get("REQUESTOR_INFO", {})
             req_ip = requestor_info.get("ip", addr[0])
-            req_port = requestor_info.get("port", 5001)
+            req_port = requestor_info.get("port", PORT)
             logging.info(f"[WORKER_REQUEST] Pedido de {req_ip}:{req_port}")
             with lock: available = [(wid, w) for wid, w in workers_filhos.items() if w["status"] == "PARADO"]
             if available:
@@ -291,11 +288,11 @@ def generate_tasks():
         with lock: pending_tasks.append(task)
         logging.info(f"[GERADOR] Tarefa {task['task_id']}")
         i += 1
-        time.sleep(2)
+        time.sleep(16)
 
 def send_metrics_loop():
-    DASHBOARD_HOST = "srv.webrelay.dev"
-    DASHBOARD_PORT = 40595
+    DASHBOARD_HOST = "10.62.217.32"
+    DASHBOARD_PORT = 8000
     logging.info(f"[DASHBOARD] Iniciando reporte para {DASHBOARD_HOST}:{DASHBOARD_PORT}")
     while True:
         try:
@@ -322,7 +319,12 @@ def send_metrics_loop():
                         "status": data.get("status", "unknown"),
                         "last_heartbeat": datetime.fromtimestamp(data["last_seen"]).isoformat() + "Z"
                     })
-
+            total_registered = 1
+            running_count = int(running_count)
+            workers_alive = int(total_registered)
+            idle_count = int(idle_count)
+            borrowed_count = int(borrowed_count)
+            received_workers = int(received_workers)
             payload = {
                 "server_uuid": MASTER_ID, "task": "performance_report", "timestamp": datetime.utcnow().isoformat() + "Z", "mensage_id": str(uuid.uuid4()),
                 "performance": {
@@ -337,13 +339,14 @@ def send_metrics_loop():
                         "tasks": {"tasks_pending": pending_count, "tasks_running": running_count}
                     },
                     "config_thresholds": {"max_task": THRESHOLD},
-                    "neighbors": neighbors_list
+                    "neighbors": neighbors_list,
                 }
             }
+            print(payload)
             s_dash = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s_dash.settimeout(10)
             s_dash.connect((DASHBOARD_HOST, DASHBOARD_PORT))
-            s_dash.sendall(json.dumps(payload).encode())
+            send_json(s_dash, payload)
             s_dash.close()
         except Exception as e: logging.error(f"[DASHBOARD] Erro: {e}")
         time.sleep(10)
