@@ -38,7 +38,7 @@ O diagrama foi construído usando a sintaxe Mermaid e é renderizado nativamente
 
 
 
-## 📝 Diagrama da Sprint 3: Protocolo de Conversa Consensual
+## 📝 Diagramas das Sprints : Protocolo de Conversa Consensual
 
 Este diagrama de sequência detalha a negociação e migração de Workers entre Masters, seguindo rigorosamente o Protocolo de Comunicação Padrão exigido (baseado em TASK e RESPONSE).
 
